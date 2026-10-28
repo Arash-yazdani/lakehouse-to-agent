@@ -24,7 +24,7 @@ Built in a day as the integration pattern a data provider's solutions team runs 
 ## Run it
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install "pyiceberg[sql-sqlite,pyarrow]" duckdb "mcp[cli]" pytest
+python3 -m venv .venv && .venv/bin/pip install "pyiceberg[sql-sqlite,pyarrow]" duckdb "mcp[cli]==2.3.0" pytest
 .venv/bin/python ingest.py
 PYTHONPATH=. .venv/bin/python -m pytest -q          # 10 tests
 .venv/bin/python server.py add-token acme-analyst    # prints the token once; only its hash is stored
