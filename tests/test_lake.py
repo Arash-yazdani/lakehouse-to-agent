@@ -1,6 +1,7 @@
 import json
 from datetime import date
 
+import duckdb
 import pyarrow.compute  # noqa: F401
 import pytest
 
@@ -91,3 +92,46 @@ def test_rejection_reason_reaches_the_agent(monkeypatch, tmp_path):
     with pytest.raises(ToolError, match="read-only"):
         server.query("drop table monthly_sales")
     assert json.loads((tmp_path / "audit.jsonl").read_text())["rejected"].startswith("read-only")
+
+
+def test_file_reads_blocked(wh):
+    # The guard allows SELECT, so DuckDB's file readers have to be closed at the engine.
+    for sql in ("select * from read_text('tokens.json')", "select * from read_json('audit.jsonl')"):
+        with pytest.raises(duckdb.PermissionException):
+            lake.query(sql, warehouse=wh)
+
+
+def test_denials_and_errors_are_audited(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
+    monkeypatch.setattr(server, "AUDIT", tmp_path / "audit.jsonl")
+    (tmp_path / "tokens.json").write_text(json.dumps({"x": server._hash("t")}))
+    monkeypatch.setenv("LAKE_TOKEN", "revoked")
+    with pytest.raises(ToolError):
+        server.query("select 1")
+    monkeypatch.setenv("LAKE_TOKEN", "t")
+    with pytest.raises(ToolError):
+        server.query("select 1", snapshot_id="not-a-number")
+    lines = [json.loads(x) for x in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert lines[0]["caller"] == "unknown" and "denied" in lines[0]
+    assert lines[1]["caller"] == "x" and "error" in lines[1]
+
+
+def test_remote_reads_blocked(wh):
+    # no extension autoload either: an https path must not pull in httpfs
+    with pytest.raises(duckdb.Error):
+        lake.query("select * from read_csv('https://example.com/x.csv')", warehouse=wh)
+
+
+def test_default_reads_cite_their_snapshot(wh, monkeypatch, tmp_path):
+    monkeypatch.setenv("LAKE_TOKEN", "t")
+    monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
+    monkeypatch.setattr(server, "AUDIT", tmp_path / "audit.jsonl")
+    (tmp_path / "tokens.json").write_text(json.dumps({"x": server._hash("t")}))
+    real_q, real_cur = lake.query, lake.current_snapshot_id
+    monkeypatch.setattr(lake, "query", lambda sql, snapshot_id=None, **k: real_q(sql, snapshot_id, warehouse=wh))
+    monkeypatch.setattr(lake, "current_snapshot_id", lambda name="monthly_sales": real_cur(name, warehouse=wh))
+    r = server.query("select count(*) from monthly_sales")
+    current = str(lake.snapshots(warehouse=wh)[-1]["snapshot_id"])
+    assert r["snapshot_id"] == current and r["rows"] == [[28]]
+    assert json.loads((tmp_path / "audit.jsonl").read_text())["snapshot_id"] == current
+

@@ -31,6 +31,10 @@ def snapshots(name: str = "monthly_sales", warehouse: Path = WAREHOUSE) -> list[
              "added_records": s.summary.additional_properties.get("added-records")} for s in t.snapshots()]
 
 
+
+def current_snapshot_id(name: str = "monthly_sales", warehouse: Path = WAREHOUSE) -> int:
+    return catalog(warehouse).load_table(TABLES[name]).current_snapshot().snapshot_id
+
 _COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
 
 
@@ -44,7 +48,10 @@ def check_sql(sql: str) -> str:
 
 
 def connect(snapshot_id: Optional[int] = None, warehouse: Path = WAREHOUSE) -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect()
+    # No file access from SQL: the guard allows SELECT, and read_json / read_text / read_csv would
+    # otherwise let any caller read the audit log, the token hashes or any file the server can open.
+    con = duckdb.connect(config={"enable_external_access": False, "autoload_known_extensions": False,
+                                 "autoinstall_known_extensions": False, "lock_configuration": True})
     cat = catalog(warehouse)
     for view, ident in TABLES.items():
         con.register(view, cat.load_table(ident).scan(snapshot_id=snapshot_id).to_arrow())

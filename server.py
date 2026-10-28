@@ -54,13 +54,22 @@ def audit(caller: str, tool: str, detail: dict, path: Optional[Path] = None) -> 
         f.write(json.dumps({"ts": time.time(), "caller": caller, "tool": tool, **detail}) + "\n")
 
 
+def _caller(tool: str) -> str:
+    """Caller for the request's token; a denied token is audited too, then refused."""
+    try:
+        return caller_for(os.environ.get("LAKE_TOKEN"))
+    except PermissionError as exc:
+        audit("unknown", tool, {"denied": str(exc)})
+        raise ToolError(str(exc)) from exc
+
+
 mcp = MCPServer("lakehouse")
 
 
 @mcp.tool()
 def list_tables() -> dict:
     """Tables, their columns and Iceberg snapshots. Call this first."""
-    caller = caller_for(os.environ.get("LAKE_TOKEN"))
+    caller = _caller("list_tables")
     audit(caller, "list_tables", {})
     out = {}
     for view in lake.TABLES:
@@ -68,7 +77,8 @@ def list_tables() -> dict:
         out[view] = {"columns": [{"name": r[0], "type": r[1]} for r in cols],
                      # snapshot ids exceed 2^53, so they cross JSON as strings or get rounded
                      "snapshots": [{**x, "snapshot_id": str(x["snapshot_id"])} for x in lake.snapshots(view)],
-                     "notes": "Census retail sales by kind of business, $ millions, monthly, via FRED."}
+                     "notes": "Census retail sales by kind of business, $ millions, monthly, via FRED. "
+                              "Grocery stores (RSGCS) are part of Food and beverage stores (RSDBS): never add the two together."}
     return out
 
 
@@ -79,16 +89,22 @@ def query(sql: str, snapshot_id: Optional[str] = None) -> dict:
     Pass snapshot_id (a string, exactly as list_tables returns it) to query the table as of that
     snapshot (time travel). Iceberg ids exceed JSON's exact-integer range, so never send a number.
     Cite the returned rows in any answer."""
-    caller = caller_for(os.environ.get("LAKE_TOKEN"))
+    caller = _caller("query")
     try:
-        result = lake.query(sql, snapshot_id=int(snapshot_id) if snapshot_id else None)
+        lake.check_sql(sql)
+        # every result cites the snapshot it read, default reads included
+        sid = int(snapshot_id) if snapshot_id else lake.current_snapshot_id()
+        result = lake.query(sql, snapshot_id=sid)
     except lake.QueryRejected as exc:
         audit(caller, "query", {"sql": sql, "rejected": str(exc)})
         # the SDK hides the message of any other exception, so the agent would see only
         # "Error executing tool query"; ToolError carries the reason so it can rewrite the query
         raise ToolError(str(exc)) from exc
-    result["snapshot_id"] = snapshot_id
-    audit(caller, "query", {"sql": sql, "snapshot_id": snapshot_id, "rows": result["row_count"]})
+    except Exception as exc:  # DuckDB errors, a malformed snapshot id: audited, then reported
+        audit(caller, "query", {"sql": sql, "snapshot_id": snapshot_id, "error": str(exc)[:300]})
+        raise ToolError(f"query failed: {exc}") from exc
+    result["snapshot_id"] = str(sid)
+    audit(caller, "query", {"sql": sql, "snapshot_id": str(sid), "rows": result["row_count"]})
     return result
 
 
