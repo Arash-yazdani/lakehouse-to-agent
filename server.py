@@ -32,11 +32,12 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _load_tokens(path: Path = TOKENS) -> dict[str, str]:
+def _load_tokens(path: Optional[Path] = None) -> dict[str, str]:
+    path = path or TOKENS
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def caller_for(token: Optional[str], path: Path = TOKENS) -> str:
+def caller_for(token: Optional[str], path: Optional[Path] = None) -> str:
     """Caller name for a token, or PermissionError. Fails closed on a missing token."""
     if not token:
         raise PermissionError("no LAKE_TOKEN")
@@ -47,8 +48,8 @@ def caller_for(token: Optional[str], path: Path = TOKENS) -> str:
     return caller
 
 
-def audit(caller: str, tool: str, detail: dict, path: Path = AUDIT) -> None:
-    with path.open("a") as f:
+def audit(caller: str, tool: str, detail: dict, path: Optional[Path] = None) -> None:
+    with (path or AUDIT).open("a") as f:
         f.write(json.dumps({"ts": time.time(), "caller": caller, "tool": tool, **detail}) + "\n")
 
 
@@ -64,23 +65,26 @@ def list_tables() -> dict:
     for view in lake.TABLES:
         cols = lake.query(f"DESCRIBE {view}")["rows"]
         out[view] = {"columns": [{"name": r[0], "type": r[1]} for r in cols],
-                     "snapshots": lake.snapshots(view),
+                     # snapshot ids exceed 2^53, so they cross JSON as strings or get rounded
+                     "snapshots": [{**x, "snapshot_id": str(x["snapshot_id"])} for x in lake.snapshots(view)],
                      "notes": "Census retail sales by kind of business, $ millions, monthly, via FRED."}
     return out
 
 
 @mcp.tool()
-def query(sql: str, snapshot_id: Optional[int] = None) -> dict:
+def query(sql: str, snapshot_id: Optional[str] = None) -> dict:
     """Run ONE read-only SQL statement (DuckDB dialect) against the lake.
 
-    Pass snapshot_id from list_tables to query the table as of that snapshot (time travel).
+    Pass snapshot_id (a string, exactly as list_tables returns it) to query the table as of that
+    snapshot (time travel). Iceberg ids exceed JSON's exact-integer range, so never send a number.
     Cite the returned rows in any answer."""
     caller = caller_for(os.environ.get("LAKE_TOKEN"))
     try:
-        result = lake.query(sql, snapshot_id=snapshot_id)
+        result = lake.query(sql, snapshot_id=int(snapshot_id) if snapshot_id else None)
     except lake.QueryRejected as exc:
         audit(caller, "query", {"sql": sql, "rejected": str(exc)})
         raise
+    result["snapshot_id"] = snapshot_id
     audit(caller, "query", {"sql": sql, "snapshot_id": snapshot_id, "rows": result["row_count"]})
     return result
 

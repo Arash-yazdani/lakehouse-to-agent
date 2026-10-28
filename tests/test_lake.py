@@ -63,3 +63,18 @@ def test_audit_log(tmp_path):
     server.audit("acme", "query", {"sql": "select 1", "rows": 1}, p)
     rec = json.loads(p.read_text())
     assert rec["caller"] == "acme" and rec["sql"] == "select 1"
+
+
+def test_snapshot_ids_cross_json_as_strings(wh, monkeypatch, tmp_path):
+    # Iceberg ids exceed 2^53: as JSON numbers they get rounded and time travel misses.
+    big = lake.snapshots(warehouse=wh)[0]["snapshot_id"]
+    assert int(float(big)) != big or big < 2**53
+    monkeypatch.setattr(lake, "WAREHOUSE", wh)
+    monkeypatch.setenv("LAKE_TOKEN", "t")
+    monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
+    monkeypatch.setattr(server, "AUDIT", tmp_path / "audit.jsonl")
+    (tmp_path / "tokens.json").write_text(json.dumps({"x": server._hash("t")}))
+    real = lake.query
+    monkeypatch.setattr(lake, "query", lambda sql, snapshot_id=None, **k: real(sql, snapshot_id, warehouse=wh))
+    r = server.query("select count(*) from monthly_sales", snapshot_id=str(big))
+    assert r["rows"] == [[24]] and r["snapshot_id"] == str(big)

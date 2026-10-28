@@ -19,7 +19,7 @@ Built in a day as the integration pattern a data provider's solutions team runs 
 - Fastest year-over-year growth: gasoline stations, +28.1% ($68.0B vs $53.1B); health and personal care is the only decline, -1.2%.
 - Trailing-12-month share: nonstore (e-commerce) retailers 22.3%, the largest category.
 - Nonstore sales first exceeded department stores in **April 2020**.
-- Time travel: snapshot 1 holds 3,320 rows through Jul 2026; the current snapshot holds 3,336 through Sep 2026.
+- Time travel: snapshot 1 holds 3,320 rows through Jul 2026; the current snapshot holds 3,336 through Sep 2026. Asked through MCP, Claude reported gasoline stations as fastest-growing in both: +17.4% YoY as of Jul 2026 (snapshot 1), +28.1% as of Sep 2026.
 
 ## Run it
 
@@ -46,6 +46,11 @@ Revoke a caller without touching anyone else: `.venv/bin/python server.py revoke
 3. **Least privilege**: the server is read-only at two layers (statement guard, and an in-memory DuckDB over an Arrow scan that cannot write back to the lake).
 4. **Audit**: ship `audit.jsonl` to the customer's SIEM; each line has caller, tool, SQL, snapshot and row count, and rejected statements are logged too.
 5. **Reproducibility**: answers cite a `snapshot_id`, so a number in a report can be re-run against the exact data it came from.
+
+## Found while testing
+
+- Iceberg snapshot ids (e.g. `7514425504626583672`) exceed JSON's exact-integer range (2^53). Sent as a number over MCP, the id was rounded to `...583552`, and time travel missed. The server now returns and accepts snapshot ids as strings (regression test included).
+- SQL that starts with a `--` comment was rejected by the read-only guard; agents write that often. Comments are stripped before the check.
 
 ## Limits
 
