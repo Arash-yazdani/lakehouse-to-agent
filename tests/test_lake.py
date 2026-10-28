@@ -7,6 +7,7 @@ import pytest
 import ingest
 import lake
 import server
+from mcp.server.mcpserver.exceptions import ToolError
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def test_yoy_query(wh):
     sql = open("queries.sql").read().split(";")[0]
     r = lake.query(sql, warehouse=wh)
     by = {row[0]: row[3] for row in r["rows"]}
-    assert by["Department stores"] == 0.0
+    assert by["Food and beverage stores"] == 0.0
     assert by["Nonstore retailers"] == round(100 * 12 / 101, 1)
 
 
@@ -78,3 +79,15 @@ def test_snapshot_ids_cross_json_as_strings(wh, monkeypatch, tmp_path):
     monkeypatch.setattr(lake, "query", lambda sql, snapshot_id=None, **k: real(sql, snapshot_id, warehouse=wh))
     r = server.query("select count(*) from monthly_sales", snapshot_id=str(big))
     assert r["rows"] == [[24]] and r["snapshot_id"] == str(big)
+
+
+def test_rejection_reason_reaches_the_agent(monkeypatch, tmp_path):
+    # The MCP SDK hides the message of any exception that isn't a ToolError: the agent saw only
+    # "Error executing tool query". The guard's reason has to come through, and still be audited.
+    monkeypatch.setenv("LAKE_TOKEN", "t")
+    monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
+    monkeypatch.setattr(server, "AUDIT", tmp_path / "audit.jsonl")
+    (tmp_path / "tokens.json").write_text(json.dumps({"x": server._hash("t")}))
+    with pytest.raises(ToolError, match="read-only"):
+        server.query("drop table monthly_sales")
+    assert json.loads((tmp_path / "audit.jsonl").read_text())["rejected"].startswith("read-only")

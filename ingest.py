@@ -29,7 +29,7 @@ SERIES = {
     "RSGCS": "Grocery stores",
     "RSNSR": "Nonstore retailers",
     "RSGASS": "Gasoline stations",
-    "RSDBS": "Department stores",
+    "RSDBS": "Food and beverage stores",   # FRED RSDBS is Food and Beverage Stores; RSGCS is part of it
     "RSHPCS": "Health and personal care stores",
     "RSCCAS": "Clothing and accessory stores",
     "RSBMGESD": "Building materials and garden",

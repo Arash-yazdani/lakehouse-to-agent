@@ -17,8 +17,8 @@ Built in a day as the integration pattern a data provider's solutions team runs 
 ## Results from the hand-written queries (`queries.sql`, data through Sep 2026)
 
 - Fastest year-over-year growth: gasoline stations, +28.1% ($68.0B vs $53.1B); health and personal care is the only decline, -1.2%.
-- Trailing-12-month share: nonstore (e-commerce) retailers 22.3%, the largest category.
-- Nonstore sales first exceeded department stores in **April 2020**.
+- Trailing-12-month share: nonstore (e-commerce) retailers 26.0%, the largest of the 7 non-overlapping categories (grocery stores are part of food and beverage stores, so the share query leaves them out).
+- Nonstore sales first exceeded food and beverage stores in **April 2020**.
 - Time travel: snapshot 1 holds 3,320 rows through Jul 2026; the current snapshot holds 3,336 through Sep 2026. Asked through MCP, Claude reported gasoline stations as fastest-growing in both: +17.4% YoY as of Jul 2026 (snapshot 1), +28.1% as of Sep 2026.
 
 ## Run it
@@ -26,7 +26,7 @@ Built in a day as the integration pattern a data provider's solutions team runs 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install "pyiceberg[sql-sqlite,pyarrow]" duckdb "mcp[cli]==2.3.0" pytest
 .venv/bin/python ingest.py
-PYTHONPATH=. .venv/bin/python -m pytest -q          # 11 tests
+PYTHONPATH=. .venv/bin/python -m pytest -q          # 12 tests
 .venv/bin/python server.py add-token acme-analyst    # prints the token once; only its hash is stored
 ```
 
@@ -51,6 +51,8 @@ Revoke a caller without touching anyone else: `.venv/bin/python server.py revoke
 
 - Iceberg snapshot ids (e.g. `7514425504626583672`) exceed JSON's exact-integer range (2^53). Sent as a number over MCP, the id was rounded to `...583552`, and time travel missed. The server now returns and accepts snapshot ids as strings (regression test included).
 - SQL that starts with a `--` comment was rejected by the read-only guard; agents write that often. Comments are stripped before the check.
+- The agent flagged that the series labeled department stores ran at about $85B a month, too large for department stores. FRED confirms `RSDBS` is Food and Beverage Stores, so the label in `ingest.py` was wrong. Grocery stores (`RSGCS`) are part of it, so the share query now leaves them out instead of counting them twice.
+- A rejected statement reached the agent as a bare `Error executing tool query`: the MCP SDK hides the message of any exception that isn't a `ToolError`. The server now raises `ToolError` with the guard's reason, so the agent can rewrite its query; the audit log already recorded the reason (regression test included).
 
 ## Limits
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 import lake
 
@@ -83,7 +84,9 @@ def query(sql: str, snapshot_id: Optional[str] = None) -> dict:
         result = lake.query(sql, snapshot_id=int(snapshot_id) if snapshot_id else None)
     except lake.QueryRejected as exc:
         audit(caller, "query", {"sql": sql, "rejected": str(exc)})
-        raise
+        # the SDK hides the message of any other exception, so the agent would see only
+        # "Error executing tool query"; ToolError carries the reason so it can rewrite the query
+        raise ToolError(str(exc)) from exc
     result["snapshot_id"] = snapshot_id
     audit(caller, "query", {"sql": sql, "snapshot_id": snapshot_id, "rows": result["row_count"]})
     return result
