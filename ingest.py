@@ -1,7 +1,7 @@
 """FRED retail sales by store type -> Parquet -> Apache Iceberg table (local SQLite catalog).
 
-Loads in two snapshots on purpose: history first, then the latest two months as a separate
-append, the way a monthly Census release lands. Snapshot 1 is what time-travel queries read.
+Writes two snapshots: history, then the latest two months as a separate append, the way a
+monthly Census release lands, so time travel has an earlier snapshot to read.
 
     python ingest.py            # fetch from FRED (no key needed), write data/ and warehouse/
 """
@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import csv
 import io
-import shutil
 import urllib.request
 from datetime import date
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pyiceberg.catalog.sql import SqlCatalog
 
@@ -23,7 +23,7 @@ WAREHOUSE = ROOT / "warehouse"
 RAW = ROOT / "data" / "raw" / "retail_sales.parquet"
 TABLE = "retail.monthly_sales"
 
-# U.S. Census Monthly Retail Trade, sales by kind of business, millions of dollars, via FRED.
+# U.S. Census Monthly Retail Trade, sales by kind of business, millions of dollars, seasonally adjusted, via FRED.
 SERIES = {
     "RSFSDP": "Food services and drinking places",
     "RSGCS": "Grocery stores",
@@ -60,16 +60,19 @@ def to_table(series: dict[str, list[tuple[date, int]]]) -> pa.Table:
 def split_latest(table: pa.Table, months: int = 2) -> tuple[pa.Table, pa.Table]:
     """(history, latest `months` months) so the latest release lands as its own snapshot."""
     cutoffs = sorted(set(table.column("month").to_pylist()))[-months:]
-    mask = pa.compute.is_in(table.column("month"), pa.array(cutoffs, pa.date32()))
-    return table.filter(pa.compute.invert(mask)), table.filter(mask)
+    mask = pc.is_in(table.column("month"), pa.array(cutoffs, pa.date32()))
+    return table.filter(pc.invert(mask)), table.filter(mask)
 
 
 def load(table: pa.Table, warehouse: Path = WAREHOUSE) -> SqlCatalog:
-    shutil.rmtree(warehouse, ignore_errors=True)
-    warehouse.mkdir(parents=True)
+    # Replace only this table: other tables in the warehouse (for example local licensed data) survive a re-ingest.
+    warehouse.mkdir(parents=True, exist_ok=True)
     catalog = SqlCatalog("local", uri=f"sqlite:///{warehouse}/catalog.db",
                          warehouse=f"file://{warehouse}")
-    catalog.create_namespace("retail")
+    if catalog.table_exists(TABLE):
+        catalog.purge_table(TABLE)
+    if ("retail",) not in catalog.list_namespaces():
+        catalog.create_namespace("retail")
     ice = catalog.create_table(TABLE, schema=SCHEMA)
     history, latest = split_latest(table)
     ice.append(history)   # snapshot 1
@@ -89,5 +92,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import pyarrow.compute  # noqa: F401  (registers pa.compute)
     main()

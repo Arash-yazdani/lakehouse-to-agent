@@ -1,4 +1,4 @@
--- Hand-written demo queries against retail.monthly_sales (Census retail sales, $ millions).
+-- Hand-written demo queries against retail.monthly_sales (Census retail sales, $ millions, seasonally adjusted).
 
 -- 1. Year-over-year growth by store type for the latest month, fastest first.
 WITH latest AS (SELECT max(month) AS m FROM monthly_sales)
@@ -13,7 +13,7 @@ JOIN monthly_sales prev
 WHERE cur.month = (SELECT m FROM latest)
 ORDER BY yoy_pct DESC;
 
--- 2. Share of total sales by store type, trailing 12 months (window function).
+-- 2. Each store type's share of the 7 non-overlapping types' combined sales, trailing 12 months (window function).
 --    Grocery stores (RSGCS) are left out: they are part of food and beverage stores (RSDBS).
 SELECT category,
        sum(sales_musd)                                                AS ttm_sales,
@@ -24,7 +24,7 @@ WHERE month > (SELECT max(month) FROM monthly_sales) - INTERVAL 12 MONTH
 GROUP BY category
 ORDER BY ttm_sales DESC;
 
--- 3. Nonstore (e-commerce) vs food and beverage stores: the crossover month.
+-- 3. Nonstore retailers (mostly e-commerce) vs food and beverage stores: the crossover month.
 SELECT min(month) AS first_month_nonstore_exceeded_food_bev
 FROM (SELECT month,
              max(sales_musd) FILTER (WHERE series_id = 'RSNSR') AS nonstore,

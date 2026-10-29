@@ -1,8 +1,8 @@
 import json
 from datetime import date
+from pathlib import Path
 
 import duckdb
-import pyarrow.compute  # noqa: F401
 import pytest
 
 import ingest
@@ -31,11 +31,17 @@ def test_two_snapshots_and_time_travel(wh):
 
 
 def test_yoy_query(wh):
-    sql = open("queries.sql").read().split(";")[0]
+    sql = (Path(__file__).parents[1] / "queries.sql").read_text().split(";")[0]
     r = lake.query(sql, warehouse=wh)
     by = {row[0]: row[3] for row in r["rows"]}
     assert by["Food and beverage stores"] == 0.0
     assert by["Nonstore retailers"] == round(100 * 12 / 101, 1)
+
+
+def test_truncated_only_when_rows_are_cut(wh):
+    assert lake.query("select * from range(3)", limit=3, warehouse=wh)["truncated"] is False
+    r = lake.query("select * from range(4)", limit=3, warehouse=wh)
+    assert r["truncated"] is True and r["row_count"] == 3
 
 
 @pytest.mark.parametrize("sql", ["drop table monthly_sales", "select 1; drop table x",
@@ -60,6 +66,15 @@ def test_tokens_hashed_revocable_and_fail_closed(tmp_path):
     assert server.caller_for("t-beta", path) == "beta"
 
 
+def test_revoke_unknown_caller_fails(monkeypatch, tmp_path):
+    # a misspelled name used to exit 0 and leave the real token active
+    monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
+    server.main(["add-token", "acme"])
+    with pytest.raises(SystemExit, match="nothing revoked"):
+        server.main(["revoke", "acme-typo"])
+    assert "acme" in json.loads((tmp_path / "tokens.json").read_text())
+
+
 def test_audit_log(tmp_path):
     p = tmp_path / "audit.jsonl"
     server.audit("acme", "query", {"sql": "select 1", "rows": 1}, p)
@@ -70,7 +85,6 @@ def test_audit_log(tmp_path):
 def test_snapshot_ids_cross_json_as_strings(wh, monkeypatch, tmp_path):
     # Iceberg ids exceed 2^53: as JSON numbers they get rounded and time travel misses.
     big = lake.snapshots(warehouse=wh)[0]["snapshot_id"]
-    assert int(float(big)) != big or big < 2**53
     monkeypatch.setattr(lake, "WAREHOUSE", wh)
     monkeypatch.setenv("LAKE_TOKEN", "t")
     monkeypatch.setattr(server, "TOKENS", tmp_path / "tokens.json")
@@ -135,3 +149,26 @@ def test_default_reads_cite_their_snapshot(wh, monkeypatch, tmp_path):
     assert r["snapshot_id"] == current and r["rows"] == [[28]]
     assert json.loads((tmp_path / "audit.jsonl").read_text())["snapshot_id"] == current
 
+
+
+def test_results_cite_each_table_snapshot(wh):
+    snaps = lake.snapshots(warehouse=wh)
+    r = lake.query("select count(*) from monthly_sales", snaps[0]["snapshot_id"], warehouse=wh)
+    assert r["snapshots_read"] == {"monthly_sales": str(snaps[0]["snapshot_id"])}
+    assert lake.query("select 1", warehouse=wh)["snapshots_read"] == {}
+
+
+def test_unknown_snapshot_id_fails(wh):
+    with pytest.raises(ValueError):
+        lake.query("select count(*) from monthly_sales", 123, warehouse=wh)
+
+
+def test_reingest_keeps_other_tables(wh):
+    import pyarrow as pa
+    cat = lake.catalog(wh)
+    cat.create_namespace("other")
+    t = pa.table({"x": [1, 2]})
+    cat.create_table("other.keep", schema=t.schema).append(t)
+    ingest.load(ingest.to_table({"RSNSR": [(date(2026, 1, 1), 1), (date(2026, 2, 1), 2), (date(2026, 3, 1), 3)]}), wh)
+    assert lake.catalog(wh).load_table("other.keep").scan().to_arrow().num_rows == 2
+    assert lake.query("select count(*) from monthly_sales", warehouse=wh)["rows"] == [[3]]

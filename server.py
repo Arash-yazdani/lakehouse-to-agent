@@ -1,8 +1,8 @@
 """MCP server over the Iceberg lake: read-only SQL with per-caller tokens and an audit log.
 
-Identity-bound access, the way a customer integration should work: each caller gets its own
-token (stored hashed in tokens.json), every query is written to audit.jsonl with the caller's
-name, and a token can be revoked without touching anyone else.
+Each caller gets its own token, stored as a SHA-256 hash in tokens.json. Every call is appended
+to audit.jsonl under the caller's name (a denied token as "unknown"). Revoking one caller leaves
+the others working.
 
     python server.py add-token <caller>      # prints a new token once; stores only its hash
     python server.py revoke <caller>
@@ -77,8 +77,7 @@ def list_tables() -> dict:
         out[view] = {"columns": [{"name": r[0], "type": r[1]} for r in cols],
                      # snapshot ids exceed 2^53, so they cross JSON as strings or get rounded
                      "snapshots": [{**x, "snapshot_id": str(x["snapshot_id"])} for x in lake.snapshots(view)],
-                     "notes": "Census retail sales by kind of business, $ millions, monthly, via FRED. "
-                              "Grocery stores (RSGCS) are part of Food and beverage stores (RSDBS): never add the two together."}
+                     "notes": lake.NOTES.get(view, "")}
     return out
 
 
@@ -103,8 +102,9 @@ def query(sql: str, snapshot_id: Optional[str] = None) -> dict:
     except Exception as exc:  # DuckDB errors, a malformed snapshot id: audited, then reported
         audit(caller, "query", {"sql": sql, "snapshot_id": snapshot_id, "error": str(exc)[:300]})
         raise ToolError(f"query failed: {exc}") from exc
-    result["snapshot_id"] = str(sid)
-    audit(caller, "query", {"sql": sql, "snapshot_id": str(sid), "rows": result["row_count"]})
+    result["snapshot_id"] = str(sid)  # the snapshot requested; snapshots_read is per table
+    audit(caller, "query", {"sql": sql, "snapshot_id": str(sid), "snapshots_read": result["snapshots_read"],
+                            "rows": result["row_count"]})
     return result
 
 
@@ -116,7 +116,8 @@ def main(argv: list[str]) -> None:
         print(token)
     elif argv[:1] == ["revoke"] and len(argv) == 2:
         tokens = _load_tokens()
-        tokens.pop(argv[1], None)
+        if tokens.pop(argv[1], None) is None:  # a misspelled name must not look like a revocation
+            sys.exit(f"no caller named {argv[1]!r}; nothing revoked")
         TOKENS.write_text(json.dumps(tokens, indent=2))
     elif not argv:
         caller_for(os.environ.get("LAKE_TOKEN"))  # refuse to start with a bad token
